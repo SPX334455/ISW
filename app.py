@@ -1,11 +1,12 @@
 # FILE: app.py
+# Full working backend for Instagram Story watcher (for iPad Shortcuts)
 from fastapi import FastAPI
-import httpx, datetime, os
+import httpx, datetime, os, json
 
 app = FastAPI()
 
-USERNAME = os.getenv("target_username")
-LAST_ID = None
+USERNAME = os.getenv("target_username")  # Environment variable from Render
+LAST_ID = None  # Memory cache
 
 @app.get("/")
 def home():
@@ -13,32 +14,46 @@ def home():
 
 @app.get("/stories")
 def get_stories():
+    """
+    Check if a public Instagram account has new story.
+    Returns new_story flag + story_url if changed.
+    """
     global LAST_ID
     url = f"https://www.instagram.com/{USERNAME}/?__a=1&__d=dis"
-    headers = {"User-Agent": "Mozilla/5.0"}
-    try:
-        r = httpx.get(url, headers=headers, timeout=15)
-        r.raise_for_status()
-    except Exception as e:
-        return {"error": f"Request failed: {e}"}
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
+            "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile Safari/604.1"
+        )
+    }
 
-    # 🔍 Güvenli JSON parse — hata durumunda log döndür
     try:
+        r = httpx.get(url, headers=headers, timeout=10)
+
+        # bazen HTML döner, JSON yerine
+        if "application/json" not in r.headers.get("content-type", ""):
+            return {"error": "Instagram returned non-JSON", "new_story": False}
+
         data = r.json()
-    except Exception:
-        # Burada Instagram HTML döndürüyorsa, ilk 200 karakteri gör
-        text_preview = r.text[:200]
-        return {
-            "error": "Invalid JSON from Instagram",
-            "preview": text_preview
-        }
+        user = data.get("graphql", {}).get("user", {})
 
-    user = data.get("graphql", {}).get("user", {})
-    story_timestamp = user.get("highlight_reel_count")
-    now = datetime.datetime.utcnow().isoformat()
+        # story ID yerine highlight count kullanıyoruz (proxy göstergesi)
+        story_timestamp = user.get("highlight_reel_count")
+        now = datetime.datetime.utcnow().isoformat()
 
-    if story_timestamp != LAST_ID:
-        LAST_ID = story_timestamp
-        return {"new_story": True, "time": now, "username": USERNAME}
+        if story_timestamp != LAST_ID:
+            LAST_ID = story_timestamp
+            story_url = f"https://instagram.com/stories/{USERNAME}/"
+            return {
+                "new_story": True,
+                "username": USERNAME,
+                "time": now,
+                "story_url": story_url,
+            }
 
-    return {"new_story": False, "time": now, "username": USERNAME}
+        return {"new_story": False, "username": USERNAME, "time": now}
+
+    except json.JSONDecodeError:
+        return {"error": "Invalid JSON from Instagram", "new_story": False}
+    except Exception as e:
+        return {"error": str(e), "new_story": False}
