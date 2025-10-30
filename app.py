@@ -1,59 +1,71 @@
 # FILE: app.py
-# Full working backend for Instagram Story watcher (for iPad Shortcuts)
-from fastapi import FastAPI
-import httpx, datetime, os, json
+# Real Instagram story watcher (login-free, via RapidAPI)
+from fastapi import FastAPI, HTTPException
+import httpx, os, datetime, uuid, aiofiles
+from pathlib import Path
 
 app = FastAPI()
 
-USERNAME = os.getenv("target_username")  # Environment variable from Render
-LAST_ID = None  # Memory cache
+USERNAME = os.getenv("TARGET_USERNAME")
+RAPIDAPI_KEY = os.getenv("RAPIDAPI_KEY")
+STORAGE_PATH = Path("data")
+STORAGE_PATH.mkdir(exist_ok=True)
+
+LAST_ID = None  # cache
+
+def now():
+    return datetime.datetime.utcnow().isoformat()
 
 @app.get("/")
 def home():
-    return {"status": "ok", "message": f"Story watcher active for {USERNAME}"}
+    return {"status": "ok", "watching": USERNAME}
 
 @app.get("/stories")
-def get_stories():
-    """
-    Check if a public Instagram account has new story.
-    Returns new_story flag + story_url if changed.
-    """
+async def stories():
     global LAST_ID
-    url = f"https://www.instagram.com/{USERNAME}/?__a=1&__d=dis"
+    if not USERNAME or not RAPIDAPI_KEY:
+        raise HTTPException(status_code=400, detail="Missing env vars: TARGET_USERNAME or RAPIDAPI_KEY")
+
+    url = f"https://instagram-story-downloader.p.rapidapi.com/index?url=https://www.instagram.com/{USERNAME}/"
     headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
-            "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile Safari/604.1"
-        )
+        "x-rapidapi-host": "instagram-story-downloader.p.rapidapi.com",
+        "x-rapidapi-key": RAPIDAPI_KEY,
     }
+    async with httpx.AsyncClient() as client:
+        r = await client.get(url, headers=headers)
+    if r.status_code != 200:
+        raise HTTPException(status_code=500, detail=f"API error {r.status_code}")
+    data = r.json()
+    stories = data.get("result", [])
+    if not stories:
+        return {"new_story": False, "username": USERNAME, "time": now()}
 
-    try:
-        r = httpx.get(url, headers=headers, timeout=10)
+    latest = stories[0]
+    story_id = latest.get("id") or latest.get("url")
+    if story_id != LAST_ID:
+        LAST_ID = story_id
+        media_url = latest.get("url")
+        ext = "mp4" if "mp4" in media_url else "jpg"
+        filename = f"{USERNAME}_{uuid.uuid4().hex}.{ext}"
+        path = STORAGE_PATH / filename
+        async with httpx.AsyncClient() as c:
+            m = await c.get(media_url)
+        if m.status_code == 200:
+            async with aiofiles.open(path, "wb") as f:
+                await f.write(m.content)
+        return {
+            "new_story": True,
+            "username": USERNAME,
+            "time": now(),
+            "media_url": media_url,
+            "file": f"/media/{filename}",
+        }
+    return {"new_story": False, "username": USERNAME, "time": now()}
 
-        # bazen HTML döner, JSON yerine
-        if "application/json" not in r.headers.get("content-type", ""):
-            return {"error": "Instagram returned non-JSON", "new_story": False}
-
-        data = r.json()
-        user = data.get("graphql", {}).get("user", {})
-
-        # story ID yerine highlight count kullanıyoruz (proxy göstergesi)
-        story_timestamp = user.get("highlight_reel_count")
-        now = datetime.datetime.utcnow().isoformat()
-
-        if story_timestamp != LAST_ID:
-            LAST_ID = story_timestamp
-            story_url = f"https://instagram.com/stories/{USERNAME}/"
-            return {
-                "new_story": True,
-                "username": USERNAME,
-                "time": now,
-                "story_url": story_url,
-            }
-
-        return {"new_story": False, "username": USERNAME, "time": now}
-
-    except json.JSONDecodeError:
-        return {"error": "Invalid JSON from Instagram", "new_story": False}
-    except Exception as e:
-        return {"error": str(e), "new_story": False}
+@app.get("/media/{filename}")
+async def serve_file(filename: str):
+    path = STORAGE_PATH / filename
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="file not found")
+    from fastapi.responses import FileResponse
+    return FileResponse(path)
