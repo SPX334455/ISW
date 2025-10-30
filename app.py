@@ -5,7 +5,7 @@ import httpx, datetime
 
 app = FastAPI()
 
-USERNAME = "hedef_username"  # <-- buraya takip etmek istediğin hesap adını yaz
+USERNAME = "hedef_username", "target_usarname"  # <-- buraya takip etmek istediğin hesap adını yaz
 LAST_ID = None  # memory cache
 
 @app.get("/")
